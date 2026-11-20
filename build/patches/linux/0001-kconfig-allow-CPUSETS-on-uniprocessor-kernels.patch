@@ -1,0 +1,32 @@
+From 44faf65fe8f1ac76b55649341d4d293dbc6d42fd Mon Sep 17 00:00:00 2001
+From: unk8s <unk8s@localhost>
+Date: Tue, 17 Nov 2026 08:23:57 +0100
+Subject: [PATCH] kconfig: allow CPUSETS on uniprocessor kernels
+
+k3s refuses to start its agent unless cgroup v2 exposes the cpu, cpuset,
+and memory controllers (pkg/cgroups/cgroups_linux.go), and the wasm
+kernel is uniprocessor, so `depends on SMP` silently drops CPUSETS from
+the config. The cpuset controller works on UP: kernel/cgroup/cpuset.c is
+gated only on CONFIG_CPUSETS, and the scheduler helpers it calls have UP
+stubs in include/linux/sched/topology.h. CPU_ISOLATION keeps its own SMP
+dependency, so select it only on SMP; include/linux/sched/isolation.h
+stubs it out otherwise.
+---
+ init/Kconfig | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/init/Kconfig b/init/Kconfig
+index ad592fdf2..1d828a047 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1313,9 +1313,8 @@ config CGROUP_HUGETLB
+ 
+ config CPUSETS
+ 	bool "Cpuset controller"
+-	depends on SMP
+ 	select UNION_FIND
+-	select CPU_ISOLATION
++	select CPU_ISOLATION if SMP
+ 	help
+ 	  This option will let you create and manage CPUSETs which
+ 	  allow dynamically partitioning a system into sets of CPUs and

@@ -1,0 +1,13 @@
+diff --git a/kernel/build.sh b/kernel/build.sh
+index 3f3d92f..830b73d 100755
+--- a/kernel/build.sh
++++ b/kernel/build.sh
+@@ -333,6 +333,8 @@ build_kernel() {
+ 		out="$kout_smp"
+ 		frags+=(kw_smp.config)
+ 	fi
++	# dib: extra fragments for both kernels (KW_EXTRA_FRAGS)
++	frags+=(${KW_EXTRA_FRAGS:-})
+ 	[ -x "$toolchain/wasm-ld" ] || build_toolchain
+ 	prepare_kernel_tree
+ 	kernel_stamps
