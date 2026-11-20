@@ -10,6 +10,11 @@ with the features containers need that the stock kernel leaves out, and the reci
 
 Download them from the [releases](../../releases). Checksums are in [`SHA256SUMS`](SHA256SUMS).
 
+> **Known defect: an out-of-memory kill can hang these kernels.** When a process is killed for
+> exceeding a memory limit (`memory.max`), or when the whole guest runs out of memory, the first kill
+> usually works and a later one (typically the second to the sixth in one boot) hangs the kernel. The
+> stock kernel does not do this. Do not rely on memory limits with these builds. Details below.
+
 ## Compatibility: one SDK version only
 
 These kernels are built from upstream commit
@@ -45,12 +50,29 @@ Built and tested on 2026-11-20, under Node 26 with the SDK version above.
 | `ip link add br0 type bridge` | yes | yes |
 | Two network namespaces joined by veth pairs on a bridge: ping and a TCP exchange between them | yes | — |
 | `cgroup.controllers` lists `cpuset cpu memory pids` | yes | yes |
-| A process exceeding `memory.max` is killed and the kernel carries on | yes | — |
+| `memory.max` and `cpu.max` are accepted; `cpu.max` throttles | yes | — |
+| A process exceeding `memory.max` is killed and the kernel carries on | **unreliable: see "Known defect"** | **unreliable** |
 | `crun run` with its default cgroup manager (the device-cgroup BPF program loads) | yes | yes |
 | `/proc/net/netfilter` present; MASQUERADE and DNAT rules load; a DNAT from `127.0.0.1:8080` reaches a server in another namespace across the bridge | no netfilter, by design | yes |
 | Repeated NAT + conntrack + bridge traffic (25 rounds on 1 CPU, 15 on 2 CPUs) without a kernel trap | — | yes |
 
-What this does **not** establish:
+### Known defect: out-of-memory kills
+
+Reproduced on both kernels, single-CPU, under Node:
+
+- **Memory-cgroup limit.** The first kill of a process over `memory.max` works (exit 137, `oom_kill 1`,
+  the kernel keeps serving). A later kill in the same boot hangs the kernel.
+- **Whole-guest exhaustion.** A 128 MiB guest allocating 200 MB five times: the stock kernel completes
+  five of five; these kernels hang on the first or second kill.
+- **Not the cause:** `cpu.max`, `oom_dump_tasks=0`, console logging off, `oom_kill_allocating_task=1`,
+  or the cpuset controller (a build without it also hangs). A plain `kill -9` inside a memory cgroup
+  works every time, and allocation without reaching the limit works every time.
+- **Suspect, not confirmed:** `CONFIG_MEMCG`. A build without it was not completed.
+
+It is not root-caused. Until it is, treat `memory.max` on these kernels as unsafe: a container that
+exceeds it may hang the machine instead of being killed.
+
+What else this does **not** establish:
 
 - Nothing here was run in a browser. The same kernel binary runs there, but it was not tested there.
 - The netfilter load test is short. unkernel's kernel stacks are small (16 KiB shadow stacks with no
