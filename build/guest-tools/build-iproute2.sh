@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds a static arm64 (glibc) iproute2 `ip` (+ `bridge`) INSIDE the build container, for hand-in to the guest via mounts.
-# Usage (host): docker run --rm -v $PWD/build:/kb:ro -v $PWD/out:/out dib-kernel-build:1 /kb/guest-tools/build-iproute2.sh
+# Usage (host): docker run --rm -v $PWD/kernel-build:/kb:ro -v $PWD/out:/out dib-kernel-build:1 /kb/guest-tools/build-iproute2.sh
 set -euo pipefail
 V=7.3.0
 mkdir -p /tmp/ip && cd /tmp/ip

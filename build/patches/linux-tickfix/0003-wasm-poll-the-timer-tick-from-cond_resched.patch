@@ -1,0 +1,90 @@
+From 1254023b3be13f91e86bb72440a28a58f6b2f591 Mon Sep 17 00:00:00 2001
+From: dib <dib@localhost>
+Date: Sat, 21 Nov 2026 12:53:53 +0000
+Subject: [PATCH] wasm: poll the timer tick from cond_resched()
+
+There is no asynchronous interrupt delivery in arch/wasm: pending timer and host
+interrupts are polled only when user mode traps back into the kernel and in
+idle. A kernel loop that neither returns to user mode nor sleeps therefore
+never sees the tick, never sets need_resched, and cond_resched() in it never
+lets another task run. Direct reclaim retrying an allocation whose progress
+depends on another task (e.g. the reader of a full pipe) is such a loop:
+the machine spins at 100% CPU before the OOM killer is reached.
+
+Poll the pending interrupts from __cond_resched(), one call in 32, with
+interrupts enabled and outside interrupt context.
+---
+ arch/wasm/include/asm/irq.h |  2 ++
+ arch/wasm/kernel/irq.c      | 28 ++++++++++++++++++++++++
+ kernel/sched/core.c         |  3 +++
+ 3 files changed, 33 insertions(+)
+
+diff --git a/arch/wasm/include/asm/irq.h b/arch/wasm/include/asm/irq.h
+index 439408644..e9c6e2c48 100644
+--- a/arch/wasm/include/asm/irq.h
++++ b/arch/wasm/include/asm/irq.h
+@@ -37,6 +37,8 @@ struct pt_regs;
+ 
+ /* Run pending timer/host interrupts if irqs are enabled in @regs' context. */
+ void wasm_poll_irqs(struct pt_regs *regs);
++/* Called from __cond_resched(): take a pending timer tick (irq.c). */
++void kw_poll_tick(void);
+ /* Nanoseconds until the next timer expiry, -1 if none. */
+ long long wasm_timer_timeout(void);
+ 
+diff --git a/arch/wasm/kernel/irq.c b/arch/wasm/kernel/irq.c
+index 1f2055d28..227c17239 100644
+--- a/arch/wasm/kernel/irq.c
++++ b/arch/wasm/kernel/irq.c
+@@ -139,6 +139,34 @@ void wasm_poll_irqs(struct pt_regs *regs)
+ 	irq_exit_rcu();
+ }
+ 
++/*
++ * cond_resched() is where a preemptible-by-tick kernel lets other tasks in. On
++ * hardware the timer interrupt would have set need_resched by now; here there
++ * is no asynchronous delivery (see above), so a loop in the kernel that never
++ * returns to user mode and never sleeps (direct reclaim retrying an
++ * allocation, whose exit depends on a task that never gets the CPU) would
++ * never see the tick: it spun forever once the OOM killer was due. Poll the
++ * pending timer/host interrupts from cond_resched(), one call in 32 (reading
++ * the host clock is a host call). Not with interrupts disabled.
++ */
++void kw_poll_tick(void)
++{
++	struct pt_regs regs = { .kernel = 1, .irqflags = ARCH_IRQ_ENABLED,
++				.cause = PT_CAUSE_NONE };
++	static unsigned int calls;
++	irqentry_state_t state;
++	unsigned long flags;
++
++	if (++calls % 32 || irqs_disabled() || in_interrupt())
++		return;
++	/* As an interrupt would arrive: handlers (irq_work_run_list) expect irqs off. */
++	local_irq_save(flags);
++	state = irqentry_enter(&regs);
++	wasm_poll_irqs(&regs);
++	irqentry_exit(&regs, state);
++	local_irq_restore(flags);
++}
++
+ /* Called with interrupts disabled; the generic idle loop re-enables them. */
+ void arch_cpu_idle(void)
+ {
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 66abbdb6a..ebbaa543e 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -8025,6 +8025,9 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
+ #if !defined(CONFIG_PREEMPTION) || defined(CONFIG_PREEMPT_DYNAMIC)
+ int __sched __cond_resched(void)
+ {
++#ifdef CONFIG_WASM
++	kw_poll_tick();
++#endif
+ 	if (should_resched(0) && !irqs_disabled()) {
+ 		preempt_schedule_common();
+ 		return 1;
+-- 
+2.47.3
+

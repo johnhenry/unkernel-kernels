@@ -3,7 +3,8 @@
 # Build tree lives in the named volume mounted at /work; artifacts go to /out.
 set -euo pipefail
 VARIANT="${1:?variant}"
-KB=/kb                                   # kernel-build/ mounted read-only
+EXPNAME="${2:-}"                         # for variant "exp": name of /expfrag/<name>.config (experimental, never published)
+KB=/kb                                   # build/ mounted read-only
 PIN=040e142cd016da066ac018de60fcdcec3201fd24   # tag v0.2.0-261119-040e142
 REPO=https://github.com/pithings/unkernel.git
 SRC=/work/unkernel
@@ -43,10 +44,49 @@ fi
 export KWEMU="$SRC/zig-out/lib/libkwemu.a" KWEMU_SMP="$SRC/vendor/build/kwemu-smp/lib/libkwemu.a"
 export KW_RELEASE=1 KW_SMP=1
 
+if [ "$VARIANT" != stock ] && [ ! -d "$SRC/vendor/src/linux-wasm-kernel" ]; then
+  # the variants branch from upstream's patched kernel tree, which the first (stock UP) build creates together with the patched toolchain
+  log "no kernel tree yet: stock UP build first (creates vendor/src/linux-wasm-kernel and the toolchain)"
+  KW_BUILD=$SRC/vendor/build kernel/build.sh kernel
+fi
 case "$VARIANT" in
   stock)
     export KW_BUILD=$SRC/vendor/build ;;   # default tree
-  net|netfilter)
+  stock-tickfix|net|netfilter|net-nomemcg|netfilter-nomemcg|net-tickfix|netfilter-tickfix)
+    # fragments, merged in this order after kw_defconfig: net[-nomemcg].config [netfilter.config [netfilter-nomemcg.config]]
+    # "-tickfix" = the same plus patches/linux-tickfix/*.patch (cond_resched() polls the timer tick) and its own LOCALVERSION
+    TICKFIX=0; BASEV="$VARIANT"
+    case "$VARIANT" in *-tickfix) TICKFIX=1; BASEV="${VARIANT%-tickfix}" ;; esac
+    case "$BASEV" in
+      stock)              FRAGS="" ;;
+      net)                FRAGS="net.config" ;;
+      netfilter)          FRAGS="net.config netfilter.config" ;;
+      net-nomemcg)        FRAGS="net-nomemcg.config" ;;
+      netfilter-nomemcg)  FRAGS="net-nomemcg.config netfilter.config netfilter-nomemcg.config" ;;
+    esac
+    export KW_BUILD=/work/out-$VARIANT KSRC=/work/ksrc-$VARIANT
+    if [ ! -e "$KSRC/.git" ]; then
+      log "prepare kernel tree $KSRC"
+      git -C "$SRC/vendor/src/linux-wasm-kernel" worktree add -q -b "dib-$VARIANT" "$KSRC" kw-arm64-user
+      PATCHES="$KB/patches/linux/*.patch"
+      [ "$VARIANT" = stock-tickfix ] && PATCHES=""        # the control tree has none of the project's patches except the fix
+      [ "$TICKFIX" = 1 ] && PATCHES="$PATCHES $KB/patches/linux-tickfix/*.patch"
+      for p in $PATCHES; do
+        [ -e "$p" ] || continue
+        git -C "$KSRC" -c user.name=dib -c user.email=dib@localhost am "$p"
+      done
+      for f in $FRAGS; do cp "$KB/fragments/$f" "$KSRC/arch/wasm/configs/$f"; done
+      if [ "$TICKFIX" = 1 ]; then
+        echo "CONFIG_LOCALVERSION=\"-dib-$VARIANT\"" > "$KSRC/arch/wasm/configs/localversion-$VARIANT.config"
+      fi
+      git -C "$KSRC" add arch/wasm/configs
+      git -C "$KSRC" -c user.name=dib -c user.email=dib@localhost commit -q -m "dib: $VARIANT config fragments" || true
+    fi
+    [ "$TICKFIX" = 1 ] && FRAGS="$FRAGS localversion-$VARIANT.config"
+    export KW_EXTRA_FRAGS="$FRAGS" ;;
+  exp)
+    [ -n "$EXPNAME" ] && [ -f "/expfrag/$EXPNAME.config" ] || { echo "exp needs /expfrag/<name>.config" >&2; exit 2; }
+    VARIANT="exp-$EXPNAME"
     export KW_BUILD=/work/out-$VARIANT KSRC=/work/ksrc-$VARIANT
     if [ ! -e "$KSRC/.git" ]; then
       log "prepare kernel tree $KSRC"
@@ -55,17 +95,15 @@ case "$VARIANT" in
         [ -e "$p" ] || continue
         git -C "$KSRC" -c user.name=dib -c user.email=dib@localhost am "$p"
       done
-      cp "$KB/fragments/net.config" "$KSRC/arch/wasm/configs/net.config"
-      [ "$VARIANT" = netfilter ] && cp "$KB/fragments/netfilter.config" "$KSRC/arch/wasm/configs/netfilter.config"
+      cp "/expfrag/$EXPNAME.config" "$KSRC/arch/wasm/configs/$VARIANT.config"
       git -C "$KSRC" add arch/wasm/configs
-      git -C "$KSRC" -c user.name=dib -c user.email=dib@localhost commit -q -m "dib: $VARIANT config fragments"
+      git -C "$KSRC" -c user.name=dib -c user.email=dib@localhost commit -q -m "dib: $VARIANT config fragment"
     fi
-    export KW_EXTRA_FRAGS="net.config"
-    [ "$VARIANT" = netfilter ] && export KW_EXTRA_FRAGS="net.config netfilter.config" ;;
+    export KW_EXTRA_FRAGS="$VARIANT.config" ;;
   *) echo "unknown variant $VARIANT" >&2; exit 2 ;;
 esac
 
-log "kernel/build.sh kernel (UP)";  kernel/build.sh kernel
+log "kernel/build.sh kernel (UP)";  kernel/build.sh kernel || echo "(bundle refresh deferred: the SMP kernel is built next; a real failure of the UP build stops the bundle below)"
 log "kernel/build.sh smp";          kernel/build.sh smp
 log "kernel/build.sh datadisk";     kernel/build.sh datadisk
 log "kernel/build.sh base";         KW_BASE_OUT= kernel/build.sh base
